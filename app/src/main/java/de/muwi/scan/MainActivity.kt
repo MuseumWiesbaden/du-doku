@@ -1,18 +1,25 @@
 package de.muwi.scan
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.hardware.Sensor
+import android.hardware.SensorManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.OrientationEventListener
+import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
@@ -39,6 +46,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -48,30 +56,36 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeFloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -101,18 +115,28 @@ import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-
 typealias BarcodeListener = (barcode: Barcode) -> Unit
 
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var executor: ExecutorService
+    private lateinit var sensorManager: SensorManager
+
+    private var mAccelerometer: Sensor? = null
+    private var mMagnetometer: Sensor? = null
+
+    private var deviceOrientation = mutableIntStateOf(Surface.ROTATION_0)
 
     @ExperimentalPermissionsApi
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+
+        mAccelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        mMagnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
         setContent {
             MuWiScanTheme {
@@ -121,6 +145,44 @@ class MainActivity : ComponentActivity() {
         }
 
         executor = Executors.newSingleThreadExecutor()
+    }
+
+    @Composable
+    fun DeviceOrientationListener(applicationContext: Context, onOrientationChange: (Int) -> Unit) {
+
+        DisposableEffect(Unit) {
+
+            val orientationEventListener = object : OrientationEventListener(applicationContext) {
+                override fun onOrientationChanged(orientation: Int) {
+                    if (orientation == OrientationEventListener.ORIENTATION_UNKNOWN) {
+                        return
+                    }
+
+                    when (orientation) {
+                        in 45 until 135 -> {
+                            onOrientationChange(Surface.ROTATION_270)
+                        }
+
+                        in 135 until 225 -> {
+                            onOrientationChange(Surface.ROTATION_0) // disable "overhead" photo
+                        }
+
+                        in 225 until 315 -> {
+                            onOrientationChange(Surface.ROTATION_90)
+                        }
+
+                        else -> {
+                            onOrientationChange(Surface.ROTATION_0)
+                        }
+                    }
+                }
+            }
+            orientationEventListener.enable()
+
+            onDispose {
+                orientationEventListener.disable()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -136,6 +198,9 @@ class MainActivity : ComponentActivity() {
         viewModel.createSubdir()
 
         val navController = rememberNavController()
+
+        val applicationContext = LocalContext.current.applicationContext
+        DeviceOrientationListener(applicationContext) { deviceOrientation.value = it }
 
         NavHost(navController = navController, startDestination = "main") {
             composable(route = "main") {
@@ -158,6 +223,11 @@ class MainActivity : ComponentActivity() {
         onNavigateToBarcode: () -> Unit,
         onNavigateToPhotos: () -> Unit
     ) {
+        val context = LocalContext.current
+
+        // unlock orientation to user-specified orientation
+        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_USER
+
         requestCameraPermissions()
 
         val uiState by viewModel.uiState.collectAsState()
@@ -182,8 +252,7 @@ class MainActivity : ComponentActivity() {
                         .weight(1f),
                     horizontalAlignment = Alignment.Start,
                     verticalArrangement = Arrangement.spacedBy(
-                        12.dp,
-                        Alignment.CenterVertically
+                        12.dp, Alignment.CenterVertically
                     )
                 ) {
                     OutlinedTextField(
@@ -249,10 +318,14 @@ class MainActivity : ComponentActivity() {
     fun BarcodePreviewScreen(
         viewModel: AppViewModel = viewModel(), onPopBackStack: () -> Unit
     ) {
+        val context = LocalContext.current
+
+        // lock orientation to portrait
+        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+
         val state = viewModel.uiState.collectAsState()
 
         val lifecycleOwner = LocalLifecycleOwner.current
-        val context = LocalContext.current
 
         val lensFacing = CameraSelector.LENS_FACING_BACK
 
@@ -276,6 +349,8 @@ class MainActivity : ComponentActivity() {
                         })
                 }
 
+        analyzer.targetRotation = deviceOrientation.value
+
         LaunchedEffect(lensFacing) {
             val cameraProvider = context.getCameraProvider()
             cameraProvider.unbindAll()
@@ -283,14 +358,12 @@ class MainActivity : ComponentActivity() {
             preview.surfaceProvider = previewView.surfaceProvider
         }
 
-        val animatedAlpha by animateFloatAsState(
-            targetValue = if (barcodeDetected) 1.0f else 0f,
+        val animatedAlpha by animateFloatAsState(targetValue = if (barcodeDetected) 1.0f else 0f,
             label = "alpha",
             animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
             finishedListener = {
                 onPopBackStack()
-            }
-        )
+            })
 
         Box(
             modifier = Modifier.fillMaxSize()
@@ -298,16 +371,14 @@ class MainActivity : ComponentActivity() {
             Box(modifier = Modifier.fillMaxSize()) {
                 AndroidView(factory = { previewView })
             }
-            Box(
-                modifier = Modifier
-                    .size(128.dp)
-                    .graphicsLayer {
-                        alpha = animatedAlpha
-                    }
-                    .clip(CircleShape)
-                    .background(Color.Black)
-                    .align(Alignment.Center)
-            ) {
+            Box(modifier = Modifier
+                .size(128.dp)
+                .graphicsLayer {
+                    alpha = animatedAlpha
+                }
+                .clip(CircleShape)
+                .background(Color.Black)
+                .align(Alignment.Center)) {
                 Icon(
                     modifier = Modifier.align(Alignment.Center),
                     painter = painterResource(id = R.drawable.baseline_check_24),
@@ -326,11 +397,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        Log.d("muwi", "onconfigurationchanged ${newConfig.orientation}")
+    }
+
     @Composable
     fun PhotoPreviewScreen(
         viewModel: AppViewModel = viewModel()
     ) {
-        var captureMs by remember { mutableStateOf(0L) }
+        val context = LocalContext.current
+
+        // lock orientation to portrait
+        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+
+        var captureMs by remember { mutableLongStateOf(0L) }
         val alpha = remember { Animatable(0f) }
         LaunchedEffect(captureMs) {
             alpha.animateTo(1f)
@@ -345,7 +426,6 @@ class MainActivity : ComponentActivity() {
         }
 
         val lifecycleOwner = LocalLifecycleOwner.current
-        val context = LocalContext.current
 
         val preview = Preview.Builder().build()
         val previewView = remember {
@@ -359,9 +439,15 @@ class MainActivity : ComponentActivity() {
                 .build()
         }
 
+        imageCapture.targetRotation = deviceOrientation.value
+
         val cameraSelector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
 
         var camera by remember { mutableStateOf<Camera?>(null) }
+        var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
+
+        var minZoom by remember { mutableFloatStateOf(0f) }
+        var maxZoom by remember { mutableFloatStateOf(1f) }
 
         LaunchedEffect(lensFacing) {
             val cameraProvider = context.getCameraProvider()
@@ -369,6 +455,12 @@ class MainActivity : ComponentActivity() {
             camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner, cameraSelector, preview, imageCapture
             )
+            cameraControl = camera?.cameraControl
+
+            minZoom = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 0f
+            maxZoom = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
+
+            Log.d("muwi", "minZoom=$minZoom, minZoom=$maxZoom")
 
             preview.surfaceProvider = previewView.surfaceProvider
             previewView.scaleType = PreviewView.ScaleType.FIT_START
@@ -380,9 +472,13 @@ class MainActivity : ComponentActivity() {
                 .background(color = Color.Black)
                 .windowInsetsPadding(WindowInsets.displayCutout)
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 AndroidView(modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxWidth()
+                    .aspectRatio(3.0f / 4.0f) // todo sensor aspect ratio?
                     .pointerInput(Unit) {
 
                         detectTapGestures {
@@ -395,7 +491,7 @@ class MainActivity : ComponentActivity() {
                                 .Builder(point)
                                 .build()
 
-                            camera?.cameraControl?.startFocusAndMetering(action)
+                            cameraControl?.startFocusAndMetering(action)
 
                             Log.d("muwi", "${it.y} ${previewView.height}")
 
@@ -403,7 +499,42 @@ class MainActivity : ComponentActivity() {
                         }
                     }, factory = { previewView })
 
+                val options = listOf(minZoom, 1.0f, 2.0f)
+                var selectedIndex by remember { mutableIntStateOf(1) }
 
+                val animatedProgress = animateFloatAsState(
+                    targetValue = when (deviceOrientation.value) {
+                        Surface.ROTATION_90 -> {
+                            90f
+                        }
+
+                        Surface.ROTATION_270 -> {
+                            -90f
+                        }
+
+                        else -> {
+                            0f
+                        }
+                    },
+                    label = "zoomLabelRotation",
+                    animationSpec = spring(dampingRatio = 1.0f, stiffness = Spring.StiffnessHigh)
+                )
+
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(20.dp)) {
+                    options.forEachIndexed { index, label ->
+                        SegmentedButton(shape = SegmentedButtonDefaults.itemShape(
+                            index = index, count = options.size
+                        ), onClick = {
+                            selectedIndex = index
+                            cameraControl?.setZoomRatio(options[index])
+                        }, selected = index == selectedIndex, icon = {}) {
+                            Text(
+                                modifier = Modifier.rotate(animatedProgress.value),
+                                text = "%.1f".format(options[index])
+                            )
+                        }
+                    }
+                }
             }
             Box(
                 modifier = Modifier
@@ -450,16 +581,9 @@ class MainActivity : ComponentActivity() {
                 label = "shutterButtonPressRotation"
             )
 
-            val orientation = LocalConfiguration.current.orientation
-
             Box(modifier = Modifier
                 .padding(36.dp)
-                .conditional(orientation == Configuration.ORIENTATION_PORTRAIT) {
-                    align(Alignment.BottomCenter)
-                }
-                .conditional(orientation == Configuration.ORIENTATION_LANDSCAPE) {
-                    align(Alignment.CenterEnd)
-                }
+                .align(Alignment.BottomCenter)
                 .size(80.dp)
                 .clip(
                     CustomRotatingMorphShape(
@@ -547,12 +671,4 @@ class MainActivity : ComponentActivity() {
                 }, ContextCompat.getMainExecutor(this))
             }
         }
-
-    fun Modifier.conditional(condition: Boolean, modifier: Modifier.() -> Modifier): Modifier {
-        return if (condition) {
-            then(modifier(Modifier))
-        } else {
-            this
-        }
-    }
 }
