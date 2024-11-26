@@ -20,6 +20,8 @@ class AppViewModel() : ViewModel() {
     private val dir =
         File(getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "MuWiCamera")
 
+    private val cacheFilename = "capture.jpg"
+
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
 
@@ -63,5 +65,9 @@ class AppViewModel() : ViewModel() {
         val filename = "%s_%02d.jpg".format(code, count)
         val file = File(dir, filename)
         return file
+    }
+
+    fun getCacheFilename(): String {
+        return cacheFilename
     }
 }

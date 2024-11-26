@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "de.muwi.scan"
-        minSdk = 33
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.9.2"
+        versionName = "0.9.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -64,6 +64,7 @@ dependencies {
     implementation(libs.androidx.material3.android)
     implementation(libs.play.services.mlkit.barcode.scanning)
     implementation(libs.androidx.graphics.shapes.android)
+    implementation(libs.commons.imaging)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

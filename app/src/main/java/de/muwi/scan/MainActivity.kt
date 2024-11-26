@@ -7,9 +7,12 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.icu.text.SimpleDateFormat
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
+import android.os.Environment.getExternalStoragePublicDirectory
 import android.util.Log
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -89,15 +92,15 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.intl.Locale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.exifinterface.media.ExifInterface
-import androidx.exifinterface.media.ExifInterface.TAG_ARTIST
 import androidx.graphics.shapes.CornerRounding
 import androidx.graphics.shapes.Morph
 import androidx.graphics.shapes.RoundedPolygon
 import androidx.graphics.shapes.circle
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -114,6 +117,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+
 
 typealias BarcodeListener = (barcode: Barcode) -> Unit
 
@@ -341,8 +345,7 @@ class MainActivity : ComponentActivity() {
         val analyzer =
             ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build().also {
-                    it.setAnalyzer(
-                        ContextCompat.getMainExecutor(context),
+                    it.setAnalyzer(ContextCompat.getMainExecutor(context),
                         BarcodeScannerProcessor { barcode ->
                             viewModel.updateLabel(barcode.rawValue.toString())
                             barcodeDetected = true
@@ -503,7 +506,7 @@ class MainActivity : ComponentActivity() {
                 var selectedIndex by remember { mutableIntStateOf(1) }
 
                 val animatedProgress = animateFloatAsState(
-                    targetValue = when (deviceOrientation.value) {
+                    targetValue = when (deviceOrientation.intValue) {
                         Surface.ROTATION_90 -> {
                             90f
                         }
@@ -521,7 +524,7 @@ class MainActivity : ComponentActivity() {
                 )
 
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(20.dp)) {
-                    options.forEachIndexed { index, label ->
+                    options.forEachIndexed { index, _ ->
                         SegmentedButton(shape = SegmentedButtonDefaults.itemShape(
                             index = index, count = options.size
                         ), onClick = {
@@ -593,10 +596,21 @@ class MainActivity : ComponentActivity() {
                 .background(Color.White)
                 .clickable(interactionSource = interactionSource, indication = null) {
 
-                    val file = viewModel.getNextFile()
+                    val cacheFileName = viewModel.getCacheFilename()
+                    File.createTempFile(cacheFileName, null, context.cacheDir)
+                    val cacheFile = File(context.cacheDir, cacheFileName)
+                    Log.w("muwi", "cache file=$cacheFile")
 
-                    Log.w("muwi", "file=$file")
-                    capture(imageCapture, executor, file, viewModel.uiState.value.artist)
+                    val targetFile = viewModel.getNextFile()
+                    Log.w("muwi", "target file=$targetFile")
+
+                    capture(
+                        imageCapture,
+                        executor,
+                        cacheFile,
+                        targetFile,
+                        viewModel.uiState.value.artist
+                    )
                     captureMs = System.currentTimeMillis()
 
                 }) {}
@@ -604,13 +618,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun capture(
-        imageCapture: ImageCapture, executor: ExecutorService, file: File, artist: String
+        imageCapture: ImageCapture,
+        executor: ExecutorService,
+        cacheFile: File,
+        targetFile: File,
+        artist: String
     ) {
-        val outputFileOptions = ImageCapture.OutputFileOptions.Builder(file).build()
+        val outputFileOptions = ImageCapture.OutputFileOptions.Builder(cacheFile).build()
 
-        Log.d("muwi", file.absolutePath.toString())
+        Log.d("muwi", cacheFile.absolutePath.toString())
 
-        imageCapture.takePicture(outputFileOptions,
+        imageCapture.takePicture(
+            outputFileOptions,
             executor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exception: ImageCaptureException) {
@@ -619,19 +638,14 @@ class MainActivity : ComponentActivity() {
 
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
 
-                    val savedUri = Uri.fromFile(file)
+                    ExifWriter.updateArtist(artist, cacheFile, targetFile)
+                    cacheFile.delete()
+
+                    val savedUri = Uri.fromFile(targetFile)
                     Log.d("muwi", "photo saved, artist=$artist, uri=$savedUri")
 
-                    val exif = ExifInterface(file)
-                    exif.setAttribute(TAG_ARTIST, artist)
-                    exif.saveAttributes()
-
-                    /*val exif = Exif.createFromFile(file)
-                    val rotation = exif.rotation
-                    Log.w("muwi", rotation.toString())*/
-
                     MediaScannerConnection.scanFile(
-                        applicationContext, arrayOf(file.toString()), null, null
+                        applicationContext, arrayOf(targetFile.toString()), null, null
                     )
                 }
             })
