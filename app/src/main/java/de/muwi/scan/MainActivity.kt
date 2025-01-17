@@ -7,12 +7,11 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.hardware.Sensor
 import android.hardware.SensorManager
-import android.icu.text.SimpleDateFormat
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
-import android.os.Environment.getExternalStoragePublicDirectory
 import android.util.Log
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -92,7 +91,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.intl.Locale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -100,7 +98,6 @@ import androidx.graphics.shapes.CornerRounding
 import androidx.graphics.shapes.Morph
 import androidx.graphics.shapes.RoundedPolygon
 import androidx.graphics.shapes.circle
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -204,7 +201,7 @@ class MainActivity : ComponentActivity() {
         val navController = rememberNavController()
 
         val applicationContext = LocalContext.current.applicationContext
-        DeviceOrientationListener(applicationContext) { deviceOrientation.value = it }
+        DeviceOrientationListener(applicationContext) { deviceOrientation.intValue = it }
 
         NavHost(navController = navController, startDestination = "main") {
             composable(route = "main") {
@@ -232,7 +229,7 @@ class MainActivity : ComponentActivity() {
         // unlock orientation to user-specified orientation
         (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_USER
 
-        requestCameraPermissions()
+        RequestCameraPermissions()
 
         val uiState by viewModel.uiState.collectAsState()
 
@@ -345,7 +342,8 @@ class MainActivity : ComponentActivity() {
         val analyzer =
             ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build().also {
-                    it.setAnalyzer(ContextCompat.getMainExecutor(context),
+                    it.setAnalyzer(
+                        ContextCompat.getMainExecutor(context),
                         BarcodeScannerProcessor { barcode ->
                             viewModel.updateLabel(barcode.rawValue.toString())
                             barcodeDetected = true
@@ -449,7 +447,7 @@ class MainActivity : ComponentActivity() {
         var camera by remember { mutableStateOf<Camera?>(null) }
         var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
 
-        var minZoom by remember { mutableFloatStateOf(0f) }
+        var minZoom by remember { mutableFloatStateOf(1f) }
         var maxZoom by remember { mutableFloatStateOf(1f) }
 
         LaunchedEffect(lensFacing) {
@@ -460,10 +458,12 @@ class MainActivity : ComponentActivity() {
             )
             cameraControl = camera?.cameraControl
 
-            minZoom = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 0f
+            minZoom = camera?.cameraInfo?.zoomState?.value?.minZoomRatio ?: 1f
             maxZoom = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
 
-            Log.d("muwi", "minZoom=$minZoom, minZoom=$maxZoom")
+            Log.d("muwi", "minZoom=$minZoom, maxZoom=$maxZoom")
+            // Pixel 9 Pro: minZoom=0.50783783, maxZoom=30.0
+            // Galaxy Tab A: minZoom=1.0, maxZoom=4.0
 
             preview.surfaceProvider = previewView.surfaceProvider
             previewView.scaleType = PreviewView.ScaleType.FIT_START
@@ -502,8 +502,21 @@ class MainActivity : ComponentActivity() {
                         }
                     }, factory = { previewView })
 
-                val options = listOf(minZoom, 1.0f, 2.0f)
-                var selectedIndex by remember { mutableIntStateOf(1) }
+                val options = mutableListOf(1.0f)
+                var selectedIndex by remember { mutableIntStateOf(0) }
+
+                if (minZoom.compareTo(1.0f) < 0) {
+                    options.add(0, minZoom)
+                    selectedIndex = 1
+                }
+
+                if (maxZoom.compareTo(2.0f) > 0) {
+                    options.add(2.0f)
+                }
+
+                if (maxZoom.compareTo(5.0f) < 0) {
+                    options.add(maxZoom)
+                }
 
                 val animatedProgress = animateFloatAsState(
                     targetValue = when (deviceOrientation.intValue) {
@@ -628,8 +641,7 @@ class MainActivity : ComponentActivity() {
 
         Log.d("muwi", cacheFile.absolutePath.toString())
 
-        imageCapture.takePicture(
-            outputFileOptions,
+        imageCapture.takePicture(outputFileOptions,
             executor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exception: ImageCaptureException) {
@@ -655,7 +667,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     @OptIn(ExperimentalPermissionsApi::class)
-    fun requestCameraPermissions() {
+    fun RequestCameraPermissions() {
         val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
 
         val requestPermissionLauncher = rememberLauncherForActivityResult(
